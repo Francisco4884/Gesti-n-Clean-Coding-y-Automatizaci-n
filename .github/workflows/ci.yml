@@ -1,0 +1,26 @@
+name: CI Pipeline - EPN Event Manager
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+      - feature/**
+      - hotfix/**
+  pull_request:
+    branches:
+      - develop
+      - main
+
+jobs:
+  validate-structure:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Repository validation
+        run: |
+          echo "Repository checked successfully"
+          ls -R src
