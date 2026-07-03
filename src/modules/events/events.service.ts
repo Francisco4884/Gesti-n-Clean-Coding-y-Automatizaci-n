@@ -65,7 +65,9 @@ export class EventsService {
       this.queryEventsRepository.find(),
     ]);
 
-    return events.flat().sort(this.sortByRecentDate);
+    return events
+      .flat()
+      .sort((left, right) => this.sortByRecentDate(left, right));
   }
 
   async findBySource(source: string) {
@@ -76,7 +78,9 @@ export class EventsService {
       this.queryEventsRepository.find({ where: { source } }),
     ]);
 
-    return events.flat().sort(this.sortByRecentDate);
+    return events
+      .flat()
+      .sort((left, right) => this.sortByRecentDate(left, right));
   }
 
   async findByEntity(entity: string) {
@@ -87,7 +91,9 @@ export class EventsService {
       this.queryEventsRepository.find({ where: { entity } }),
     ]);
 
-    return events.flat().sort(this.sortByRecentDate);
+    return events
+      .flat()
+      .sort((left, right) => this.sortByRecentDate(left, right));
   }
 
   async getStats() {
