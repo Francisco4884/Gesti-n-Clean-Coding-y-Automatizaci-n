@@ -26,7 +26,7 @@ describe('HealthController', () => {
   });
 
   it('delega la verificacion en HealthService', async () => {
-    const respuesta = { status: 'ok', timestamp: '25/7/2026, 20:30:15' };
+    const respuesta = { status: 'ok', timestamp: '2026-07-25T20:30:15.000Z' };
     healthServiceMock.check.mockResolvedValue(respuesta);
 
     await expect(controller.check()).resolves.toEqual(respuesta);

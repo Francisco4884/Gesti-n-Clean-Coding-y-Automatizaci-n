@@ -16,6 +16,7 @@ export class HealthService {
       );
     }
 
-    return { status: 'ok', timestamp: new Date().toLocaleString() };
+    // ISO-8601 UTC: formato independiente de la configuracion regional del servidor
+    return { status: 'ok', timestamp: new Date().toISOString() };
   }
 }
