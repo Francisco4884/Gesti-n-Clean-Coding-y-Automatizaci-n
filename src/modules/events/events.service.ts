@@ -35,7 +35,9 @@ export class EventsService {
     return isNaN(parsed.getTime()) ? new Date() : parsed;
   }
 
-  async registerEvent(dto: CreateEventDto): Promise<{ ok: boolean; id: number }> {
+  async registerEvent(
+    dto: CreateEventDto,
+  ): Promise<{ ok: boolean; id: number }> {
     const action = (dto.action ?? '').toUpperCase();
     const payloadStr = JSON.stringify(dto.payload ?? {});
     if (Buffer.byteLength(payloadStr, 'utf8') > this.maxPayloadBytes) {
@@ -101,17 +103,17 @@ export class EventsService {
           occurred_at: occurredAt,
         });
         const saved = await this.queryRepo.save(ev);
-        this.logger.log(`QUERY event persisted id=${saved.id}`);  
+        this.logger.log(`QUERY event persisted id=${saved.id}`);
         return { ok: true, id: saved.id };
       }
-
-      throw new BadRequestException(
-        `Acción no soportada: "${dto.action}". Use CREATE | UPDATE | DELETE | QUERY.`,
-      );
     } catch (err) {
       this.logger.error(`Fallo al persistir ${dto.action}`, err as Error);
       throw new InternalServerErrorException('No se pudo registrar el evento');
     }
+
+    throw new BadRequestException(
+      `Acción no soportada: "${dto.action}". Use CREATE | UPDATE | DELETE | QUERY.`,
+    );
   }
 
   async findAll(): Promise<object[]> {
@@ -161,7 +163,8 @@ export class EventsService {
 
       if (nextBucket === -1) break;
 
-      const { _sortTime, ...event } = buckets[nextBucket][indexes[nextBucket]++];
+      const { _sortTime, ...event } =
+        buckets[nextBucket][indexes[nextBucket]++];
       merged.push(event);
     }
 
