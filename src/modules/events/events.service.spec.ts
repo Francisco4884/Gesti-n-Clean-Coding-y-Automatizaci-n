@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { FindOperator } from 'typeorm';
 import { EventsService } from './events.service';
 import { CreateEventDto } from './dto/create-event.dto';
 import { CreateEventEntity } from '../../database/entities/create-event.entity';
@@ -10,11 +11,19 @@ import { QueryEventEntity } from '../../database/entities/query-event.entity';
 
 type StoredEvent = { id: number; occurred_at: string };
 
+type EventWhere = { occurred_at?: FindOperator<Date> };
+
+type FindArgs = {
+  where: EventWhere;
+  order?: Record<string, string>;
+  take?: number;
+};
+
 type RepoMock = {
   rows: StoredEvent[];
   create: jest.Mock;
   save: jest.Mock;
-  find: jest.Mock;
+  find: jest.Mock<Promise<StoredEvent[]>, [FindArgs]>;
   count: jest.Mock;
 };
 
@@ -23,8 +32,8 @@ const buildRepoMock = (): RepoMock => {
     rows: [],
     create: jest.fn((data: object) => data),
     save: jest.fn((data: object) => Promise.resolve({ ...data, id: 1 })),
-    find: jest.fn(({ take }: { take?: number }) =>
-      Promise.resolve(repo.rows.slice(0, take)),
+    find: jest.fn((options: FindArgs) =>
+      Promise.resolve(repo.rows.slice(0, options.take)),
     ),
     count: jest.fn(() => Promise.resolve(repo.rows.length)),
   };
@@ -37,9 +46,11 @@ const buildRows = (amount: number): StoredEvent[] =>
     occurred_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
   }));
 
+const firstFindArgs = (repo: RepoMock): FindArgs => repo.find.mock.calls[0][0];
+
 describe('EventsService', () => {
   let service: EventsService;
-  let createRepo: RepoMock;
+  let repos: Record<'create' | 'update' | 'delete' | 'query', RepoMock>;
 
   const baseDto = {
     source: 'erp',
@@ -48,26 +59,31 @@ describe('EventsService', () => {
   };
 
   beforeEach(async () => {
-    createRepo = buildRepoMock();
+    repos = {
+      create: buildRepoMock(),
+      update: buildRepoMock(),
+      delete: buildRepoMock(),
+      query: buildRepoMock(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
         {
           provide: getRepositoryToken(CreateEventEntity),
-          useValue: createRepo,
+          useValue: repos.create,
         },
         {
           provide: getRepositoryToken(UpdateEventEntity),
-          useValue: buildRepoMock(),
+          useValue: repos.update,
         },
         {
           provide: getRepositoryToken(DeleteEventEntity),
-          useValue: buildRepoMock(),
+          useValue: repos.delete,
         },
         {
           provide: getRepositoryToken(QueryEventEntity),
-          useValue: buildRepoMock(),
+          useValue: repos.query,
         },
       ],
     }).compile();
@@ -108,13 +124,13 @@ describe('EventsService', () => {
         ok: true,
         id: 1,
       });
-      expect(createRepo.save).toHaveBeenCalledTimes(1);
+      expect(repos.create.save).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('findAll', () => {
     it('aplica limit=20 y offset=0 cuando no se envían query params', async () => {
-      createRepo.rows = buildRows(25);
+      repos.create.rows = buildRows(25);
 
       const result = await service.findAll();
 
@@ -124,10 +140,21 @@ describe('EventsService', () => {
       expect(result.data).toHaveLength(20);
     });
 
-    it('devuelve data vacía cuando el offset supera el total', async () => {
-      createRepo.rows = buildRows(5);
+    it('consulta las cuatro tablas sin filtros cuando no se envía ninguno', async () => {
+      repos.create.rows = buildRows(3);
 
-      const result = await service.findAll(10, 50);
+      await service.findAll();
+
+      for (const repo of Object.values(repos)) {
+        expect(repo.find).toHaveBeenCalledTimes(1);
+        expect(firstFindArgs(repo).where).toEqual({});
+      }
+    });
+
+    it('devuelve data vacía cuando el offset supera el total', async () => {
+      repos.create.rows = buildRows(5);
+
+      const result = await service.findAll({ limit: 10, offset: 50 });
 
       expect(result.data).toEqual([]);
       expect(result.total).toBe(5);
@@ -136,16 +163,92 @@ describe('EventsService', () => {
     });
 
     it('responde 400 cuando limit está fuera del rango 1-100', async () => {
-      createRepo.rows = buildRows(5);
+      repos.create.rows = buildRows(5);
 
       for (const invalidLimit of [0, 101, -1, 'abc']) {
         const error = await service
-          .findAll(invalidLimit)
+          .findAll({ limit: invalidLimit })
           .catch((err: unknown) => err);
 
         expect(error).toBeInstanceOf(BadRequestException);
         expect((error as BadRequestException).getStatus()).toBe(400);
       }
+    });
+
+    it('combina el filtro por action con la paginación', async () => {
+      repos.create.rows = buildRows(25);
+      repos.update.rows = buildRows(9);
+
+      const result = await service.findAll({
+        action: 'CREATE',
+        limit: 5,
+        offset: 10,
+      });
+
+      expect(repos.create.find).toHaveBeenCalledTimes(1);
+      expect(repos.update.find).not.toHaveBeenCalled();
+      expect(result.total).toBe(25);
+      expect(result.limit).toBe(5);
+      expect(result.offset).toBe(10);
+      expect(result.data).toHaveLength(5);
+    });
+
+    it('combina el filtro por action, el rango de fechas y la paginación', async () => {
+      repos.create.rows = buildRows(25);
+      const from = '2026-01-01T00:05:00.000Z';
+      const to = '2026-01-01T00:20:00.000Z';
+
+      const result = await service.findAll({
+        action: 'create',
+        from,
+        to,
+        limit: 5,
+        offset: 2,
+      });
+
+      const { where, take } = firstFindArgs(repos.create);
+      expect(take).toBe(7);
+      expect(where.occurred_at).toBeInstanceOf(FindOperator);
+      expect(where.occurred_at?.type).toBe('between');
+      expect(where.occurred_at?.value).toEqual([new Date(from), new Date(to)]);
+      expect(repos.create.count).toHaveBeenCalledWith({ where });
+      expect(repos.update.count).not.toHaveBeenCalled();
+      expect(result.limit).toBe(5);
+      expect(result.offset).toBe(2);
+    });
+
+    it('aplica solo el límite inferior cuando se envía from sin to', async () => {
+      repos.create.rows = buildRows(3);
+
+      await service.findAll({ from: '2026-01-01' });
+
+      const { where } = firstFindArgs(repos.create);
+      expect(where.occurred_at?.type).toBe('moreThanOrEqual');
+      expect(where.occurred_at?.value).toEqual(new Date('2026-01-01'));
+    });
+
+    it('responde 400 cuando from o to no son fechas ISO válidas', async () => {
+      const invalidRanges = [
+        { from: 'ayer' },
+        { to: '01/02/2026' },
+        { from: '2026-13-45' },
+      ];
+
+      for (const range of invalidRanges) {
+        const error = await service.findAll(range).catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).getStatus()).toBe(400);
+      }
+    });
+
+    it('responde 400 cuando la action solicitada no existe', async () => {
+      const error = await service
+        .findAll({ action: 'ARCHIVE' })
+        .catch((err: unknown) => err);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).getStatus()).toBe(400);
     });
   });
 });

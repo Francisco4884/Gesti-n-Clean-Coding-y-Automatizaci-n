@@ -6,7 +6,13 @@ import {
   PayloadTooLargeException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import {
+  Between,
+  FindOptionsWhere,
+  LessThanOrEqual,
+  MoreThanOrEqual,
+  Repository,
+} from 'typeorm';
 import { CreateEventDto } from './dto/create-event.dto';
 import { CreateEventEntity } from '../../database/entities/create-event.entity';
 import { UpdateEventEntity } from '../../database/entities/update-event.entity';
@@ -19,6 +25,22 @@ export interface PaginatedEvents {
   limit: number;
   offset: number;
 }
+
+export interface FindEventsQuery {
+  limit?: number | string;
+  offset?: number | string;
+  action?: string;
+  from?: string;
+  to?: string;
+}
+
+type EventRepository = Repository<{ occurred_at: Date }>;
+
+type EventSource = {
+  action: string;
+  table: string;
+  repo: EventRepository;
+};
 
 @Injectable()
 export class EventsService {
@@ -37,6 +59,58 @@ export class EventsService {
     @InjectRepository(QueryEventEntity)
     private readonly queryRepo: Repository<QueryEventEntity>,
   ) {}
+
+  private selectSources(action?: string): EventSource[] {
+    const sources: EventSource[] = [
+      { action: 'CREATE', table: 'create_events', repo: this.createRepo },
+      { action: 'UPDATE', table: 'update_events', repo: this.updateRepo },
+      { action: 'DELETE', table: 'delete_events', repo: this.deleteRepo },
+      { action: 'QUERY', table: 'query_events', repo: this.queryRepo },
+    ];
+
+    if (action === undefined || action === '') return sources;
+
+    const requested = action.toUpperCase();
+    const selected = sources.filter((source) => source.action === requested);
+    if (selected.length === 0) {
+      throw new BadRequestException(
+        `Acción no soportada: "${action}". Use CREATE | UPDATE | DELETE | QUERY.`,
+      );
+    }
+
+    return selected;
+  }
+
+  private normalizeDateRange(
+    from?: string,
+    to?: string,
+  ): FindOptionsWhere<{ occurred_at: Date }> {
+    const parsedFrom = this.parseIsoDate(from, 'from');
+    const parsedTo = this.parseIsoDate(to, 'to');
+
+    if (parsedFrom && parsedTo) {
+      return { occurred_at: Between(parsedFrom, parsedTo) };
+    }
+    if (parsedFrom) return { occurred_at: MoreThanOrEqual(parsedFrom) };
+    if (parsedTo) return { occurred_at: LessThanOrEqual(parsedTo) };
+
+    return {};
+  }
+
+  private parseIsoDate(value: string | undefined, field: string): Date | null {
+    if (value === undefined || value === '') return null;
+
+    const isoPattern =
+      /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d{1,3})?(Z|[+-]\d{2}:?\d{2})?)?$/;
+    const parsed = new Date(value);
+    if (!isoPattern.test(value) || isNaN(parsed.getTime())) {
+      throw new BadRequestException(
+        `${field} debe ser una fecha ISO 8601 válida`,
+      );
+    }
+
+    return parsed;
+  }
 
   private normalizePagination(
     limit?: number | string,
@@ -161,32 +235,20 @@ export class EventsService {
     );
   }
 
-  async findAll(
-    limit?: number | string,
-    offset?: number | string,
-  ): Promise<PaginatedEvents> {
-    const page = this.normalizePagination(limit, offset);
+  async findAll(query: FindEventsQuery = {}): Promise<PaginatedEvents> {
+    const page = this.normalizePagination(query.limit, query.offset);
+    const where = this.normalizeDateRange(query.from, query.to);
+    const sources = this.selectSources(query.action);
     const orderByDate = { occurred_at: 'ASC' as const };
     // Solo se traen las filas que pueden entrar en la página solicitada.
     const take = page.offset + page.limit;
-    const [
-      creates,
-      updates,
-      deletes,
-      queries,
-      createCount,
-      updateCount,
-      deleteCount,
-      queryCount,
-    ] = await Promise.all([
-      this.createRepo.find({ order: orderByDate, take }),
-      this.updateRepo.find({ order: orderByDate, take }),
-      this.deleteRepo.find({ order: orderByDate, take }),
-      this.queryRepo.find({ order: orderByDate, take }),
-      this.createRepo.count(),
-      this.updateRepo.count(),
-      this.deleteRepo.count(),
-      this.queryRepo.count(),
+    const [rows, counts] = await Promise.all([
+      Promise.all(
+        sources.map(({ repo }) =>
+          repo.find({ where, order: orderByDate, take }),
+        ),
+      ),
+      Promise.all(sources.map(({ repo }) => repo.count({ where }))),
     ]);
 
     type EventRow = Record<string, unknown> & {
@@ -204,12 +266,9 @@ export class EventsService {
         _sortTime: this.normalizeDate(event.occurred_at).getTime(),
       }));
 
-    const buckets = [
-      withTable(creates, 'create_events'),
-      withTable(updates, 'update_events'),
-      withTable(deletes, 'delete_events'),
-      withTable(queries, 'query_events'),
-    ];
+    const buckets = sources.map(({ table }, index) =>
+      withTable(rows[index], table),
+    );
     const indexes = buckets.map(() => 0);
     const merged: object[] = [];
 
@@ -234,7 +293,7 @@ export class EventsService {
 
     return {
       data: merged.slice(page.offset),
-      total: createCount + updateCount + deleteCount + queryCount,
+      total: counts.reduce((acc, count) => acc + count, 0),
       limit: page.limit,
       offset: page.offset,
     };

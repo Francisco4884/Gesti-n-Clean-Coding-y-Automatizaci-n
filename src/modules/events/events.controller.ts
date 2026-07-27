@@ -12,8 +12,14 @@ export class EventsController {
   }
 
   @Get()
-  findAll(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.eventsService.findAll(limit, offset);
+  findAll(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('action') action?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.eventsService.findAll({ limit, offset, action, from, to });
   }
 
   @Get('source/:source')
