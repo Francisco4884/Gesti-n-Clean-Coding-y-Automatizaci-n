@@ -1,13 +1,15 @@
-import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 
 @Entity('create_events')
 export class CreateEventEntity {
   @PrimaryGeneratedColumn()
   id: number;
 
+  @Index()
   @Column({ nullable: true })
   source: string;
 
+  @Index()
   @Column({ nullable: true })
   entity: string;
 
@@ -23,6 +25,7 @@ export class CreateEventEntity {
   @Column({ type: 'text', nullable: true })
   payload: string;
 
+  @Index()
   @Column({ type: 'datetime', nullable: true })
   occurred_at: Date;
 }
