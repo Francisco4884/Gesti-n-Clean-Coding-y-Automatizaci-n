@@ -13,10 +13,20 @@ import { UpdateEventEntity } from '../../database/entities/update-event.entity';
 import { DeleteEventEntity } from '../../database/entities/delete-event.entity';
 import { QueryEventEntity } from '../../database/entities/query-event.entity';
 
+export interface PaginatedEvents {
+  data: object[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 @Injectable()
 export class EventsService {
   private readonly logger = new Logger(EventsService.name);
   private readonly maxPayloadBytes = 8 * 1024;
+  private readonly defaultLimit = 20;
+  private readonly minLimit = 1;
+  private readonly maxLimit = 100;
   constructor(
     @InjectRepository(CreateEventEntity)
     private readonly createRepo: Repository<CreateEventEntity>,
@@ -27,6 +37,41 @@ export class EventsService {
     @InjectRepository(QueryEventEntity)
     private readonly queryRepo: Repository<QueryEventEntity>,
   ) {}
+
+  private normalizePagination(
+    limit?: number | string,
+    offset?: number | string,
+  ): { limit: number; offset: number } {
+    const parsedLimit = this.parsePageNumber(limit, this.defaultLimit);
+    const parsedOffset = this.parsePageNumber(offset, 0);
+
+    if (
+      parsedLimit === null ||
+      parsedLimit < this.minLimit ||
+      parsedLimit > this.maxLimit
+    ) {
+      throw new BadRequestException(
+        `limit debe ser un entero entre ${this.minLimit} y ${this.maxLimit}`,
+      );
+    }
+
+    if (parsedOffset === null || parsedOffset < 0) {
+      throw new BadRequestException(
+        'offset debe ser un entero mayor o igual a 0',
+      );
+    }
+
+    return { limit: parsedLimit, offset: parsedOffset };
+  }
+
+  private parsePageNumber(
+    value: number | string | undefined,
+    fallback: number,
+  ): number | null {
+    if (value === undefined || value === null || value === '') return fallback;
+    const parsed = Number(value);
+    return Number.isInteger(parsed) ? parsed : null;
+  }
 
   private normalizeDate(legacy?: string | Date): Date {
     if (!legacy) return new Date();
@@ -116,13 +161,32 @@ export class EventsService {
     );
   }
 
-  async findAll(): Promise<object[]> {
+  async findAll(
+    limit?: number | string,
+    offset?: number | string,
+  ): Promise<PaginatedEvents> {
+    const page = this.normalizePagination(limit, offset);
     const orderByDate = { occurred_at: 'ASC' as const };
-    const [creates, updates, deletes, queries] = await Promise.all([
-      this.createRepo.find({ order: orderByDate }),
-      this.updateRepo.find({ order: orderByDate }),
-      this.deleteRepo.find({ order: orderByDate }),
-      this.queryRepo.find({ order: orderByDate }),
+    // Solo se traen las filas que pueden entrar en la página solicitada.
+    const take = page.offset + page.limit;
+    const [
+      creates,
+      updates,
+      deletes,
+      queries,
+      createCount,
+      updateCount,
+      deleteCount,
+      queryCount,
+    ] = await Promise.all([
+      this.createRepo.find({ order: orderByDate, take }),
+      this.updateRepo.find({ order: orderByDate, take }),
+      this.deleteRepo.find({ order: orderByDate, take }),
+      this.queryRepo.find({ order: orderByDate, take }),
+      this.createRepo.count(),
+      this.updateRepo.count(),
+      this.deleteRepo.count(),
+      this.queryRepo.count(),
     ]);
 
     type EventRow = Record<string, unknown> & {
@@ -149,7 +213,7 @@ export class EventsService {
     const indexes = buckets.map(() => 0);
     const merged: object[] = [];
 
-    while (true) {
+    while (merged.length < take) {
       let nextBucket = -1;
       let nextTime = Number.POSITIVE_INFINITY;
 
@@ -168,7 +232,12 @@ export class EventsService {
       merged.push(event);
     }
 
-    return merged;
+    return {
+      data: merged.slice(page.offset),
+      total: createCount + updateCount + deleteCount + queryCount,
+      limit: page.limit,
+      offset: page.offset,
+    };
   }
 
   async findBySource(source: string): Promise<object[]> {
