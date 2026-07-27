@@ -227,8 +227,9 @@ export class EventsService {
 
       if (nextBucket === -1) break;
 
-      const { _sortTime, ...event } =
+      const { _sortTime: sortTime, ...event } =
         buckets[nextBucket][indexes[nextBucket]++];
+      void sortTime;
       merged.push(event);
     }
 
@@ -267,7 +268,12 @@ export class EventsService {
       throw new BadRequestException('entity supera 60 caracteres');
     }
 
-    if (/[\u0000-\u001f\u007f]/.test(normalizedEntity)) {
+    const hasControlCharacter = Array.from(normalizedEntity).some((char) => {
+      const code = char.charCodeAt(0);
+      return code <= 31 || code === 127;
+    });
+
+    if (hasControlCharacter) {
       throw new BadRequestException('entity contiene caracteres no válidos');
     }
 
@@ -275,11 +281,22 @@ export class EventsService {
   }
 
   async getStats(): Promise<object> {
+    type SourceCountRow = {
+      source: string | null;
+      count: string | number;
+    };
     const lastEventQuery = (repo: Repository<{ occurred_at: Date }>) =>
       repo
         .createQueryBuilder('event')
         .select('MAX(event.occurred_at)', 'lastEventAt')
         .getRawOne<{ lastEventAt: string | null }>();
+    const sourceBreakdownQuery = (repo: Repository<{ source: string }>) =>
+      repo
+        .createQueryBuilder('event')
+        .select('event.source', 'source')
+        .addSelect('COUNT(event.id)', 'count')
+        .groupBy('event.source')
+        .getRawMany<SourceCountRow>();
     const [
       createCount,
       updateCount,
@@ -289,6 +306,10 @@ export class EventsService {
       updateLast,
       deleteLast,
       queryLast,
+      createSources,
+      updateSources,
+      deleteSources,
+      querySources,
     ] = await Promise.all([
       this.createRepo.count(),
       this.updateRepo.count(),
@@ -298,6 +319,10 @@ export class EventsService {
       lastEventQuery(this.updateRepo),
       lastEventQuery(this.deleteRepo),
       lastEventQuery(this.queryRepo),
+      sourceBreakdownQuery(this.createRepo),
+      sourceBreakdownQuery(this.updateRepo),
+      sourceBreakdownQuery(this.deleteRepo),
+      sourceBreakdownQuery(this.queryRepo),
     ]);
     const lastEventTimes = [
       createLast?.lastEventAt,
@@ -307,6 +332,20 @@ export class EventsService {
     ]
       .filter((date): date is string => Boolean(date))
       .map((date) => this.normalizeDate(date).getTime());
+    const bySource = [
+      createSources,
+      updateSources,
+      deleteSources,
+      querySources,
+    ].reduce<Record<string, number>>((acc, rows) => {
+      for (const row of rows) {
+        if (!row.source) continue;
+
+        acc[row.source] = (acc[row.source] ?? 0) + Number(row.count);
+      }
+
+      return acc;
+    }, {});
 
     return {
       create: createCount,
@@ -317,6 +356,7 @@ export class EventsService {
       lastEventAt: lastEventTimes.length
         ? new Date(Math.max(...lastEventTimes)).toISOString()
         : null,
+      bySource,
     };
   }
 }

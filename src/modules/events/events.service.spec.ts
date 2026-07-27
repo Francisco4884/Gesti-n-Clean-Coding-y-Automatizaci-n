@@ -8,7 +8,7 @@ import { UpdateEventEntity } from '../../database/entities/update-event.entity';
 import { DeleteEventEntity } from '../../database/entities/delete-event.entity';
 import { QueryEventEntity } from '../../database/entities/query-event.entity';
 
-type StoredEvent = { id: number; occurred_at: string };
+type StoredEvent = { id: number; occurred_at: string; source?: string };
 
 type LastEventRow = {
   lastEventAt: string | null;
@@ -18,7 +18,14 @@ type QueryBuilderMock = {
   select: jest.MockedFunction<
     (selection: string, alias: string) => QueryBuilderMock
   >;
+  addSelect: jest.MockedFunction<
+    (selection: string, alias: string) => QueryBuilderMock
+  >;
+  groupBy: jest.MockedFunction<(group: string) => QueryBuilderMock>;
   getRawOne: jest.MockedFunction<() => Promise<LastEventRow>>;
+  getRawMany: jest.MockedFunction<
+    () => Promise<Array<{ source: string; count: number }>>
+  >;
 };
 
 type RepoMock = {
@@ -45,16 +52,36 @@ const buildRepoMock = (): RepoMock => {
   } as RepoMock;
   const queryBuilder: QueryBuilderMock = {
     select: jest.fn((): QueryBuilderMock => queryBuilder),
-    getRawOne: jest.fn(() => Promise.resolve({ lastEventAt: repo.lastEventAt })),
+    addSelect: jest.fn((): QueryBuilderMock => queryBuilder),
+    groupBy: jest.fn((): QueryBuilderMock => queryBuilder),
+    getRawOne: jest.fn(() =>
+      Promise.resolve({ lastEventAt: repo.lastEventAt }),
+    ),
+    getRawMany: jest.fn(() => {
+      const bySource = repo.rows.reduce<Record<string, number>>((acc, row) => {
+        if (!row.source) return acc;
+
+        acc[row.source] = (acc[row.source] ?? 0) + 1;
+        return acc;
+      }, {});
+
+      return Promise.resolve(
+        Object.entries(bySource).map(([source, count]) => ({
+          source,
+          count,
+        })),
+      );
+    }),
   };
   repo.queryBuilder = queryBuilder;
   repo.createQueryBuilder = jest.fn(() => queryBuilder);
   return repo;
 };
 
-const buildRows = (amount: number): StoredEvent[] =>
+const buildRows = (amount: number, source = 'erp'): StoredEvent[] =>
   Array.from({ length: amount }, (_, index) => ({
     id: index + 1,
+    source,
     occurred_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
   }));
 
@@ -194,6 +221,9 @@ describe('EventsService', () => {
         query: 5,
         total: 14,
         lastEventAt: '2026-01-12T08:00:00.000Z',
+        bySource: {
+          erp: 14,
+        },
       });
 
       for (const repo of [createRepo, updateRepo, deleteRepo, queryRepo]) {
@@ -204,6 +234,16 @@ describe('EventsService', () => {
           'lastEventAt',
         );
         expect(repo.queryBuilder.getRawOne).toHaveBeenCalledTimes(1);
+        expect(repo.queryBuilder.select).toHaveBeenCalledWith(
+          'event.source',
+          'source',
+        );
+        expect(repo.queryBuilder.addSelect).toHaveBeenCalledWith(
+          'COUNT(event.id)',
+          'count',
+        );
+        expect(repo.queryBuilder.groupBy).toHaveBeenCalledWith('event.source');
+        expect(repo.queryBuilder.getRawMany).toHaveBeenCalledTimes(1);
       }
     });
 
@@ -215,6 +255,58 @@ describe('EventsService', () => {
         query: 0,
         total: 0,
         lastEventAt: null,
+        bySource: {},
+      });
+    });
+
+    it('agrupa correctamente eventos por source', async () => {
+      createRepo.rows = [
+        ...buildRows(2, 'laptops'),
+        ...buildRows(1, 'usuarios'),
+      ];
+
+      await expect(service.getStats()).resolves.toMatchObject({
+        bySource: {
+          laptops: 2,
+          usuarios: 1,
+        },
+      });
+    });
+
+    it('suma eventos de diferentes acciones con el mismo source', async () => {
+      createRepo.rows = buildRows(1, 'laptops');
+      updateRepo.rows = buildRows(2, 'laptops');
+      deleteRepo.rows = buildRows(1, 'laptops');
+      queryRepo.rows = buildRows(3, 'laptops');
+
+      await expect(service.getStats()).resolves.toMatchObject({
+        bySource: {
+          laptops: 7,
+        },
+      });
+    });
+
+    it('incluye multiples sources en bySource sin cambiar los conteos existentes', async () => {
+      createRepo.rows = buildRows(2, 'laptops');
+      updateRepo.rows = buildRows(1, 'usuarios');
+      deleteRepo.rows = buildRows(1, 'laptops');
+      queryRepo.rows = buildRows(1, 'usuarios');
+      createRepo.lastEventAt = '2026-01-10T08:00:00.000Z';
+      updateRepo.lastEventAt = '2026-01-11T08:00:00.000Z';
+      deleteRepo.lastEventAt = '2026-01-09T08:00:00.000Z';
+      queryRepo.lastEventAt = '2026-01-12T08:00:00.000Z';
+
+      await expect(service.getStats()).resolves.toEqual({
+        create: 2,
+        update: 1,
+        delete: 1,
+        query: 1,
+        total: 5,
+        lastEventAt: '2026-01-12T08:00:00.000Z',
+        bySource: {
+          laptops: 3,
+          usuarios: 2,
+        },
       });
     });
   });
